@@ -132,7 +132,7 @@ jobs:
 
       - name: Check llms-full.txt and llms/ are current
         id: check
-        if: steps.tests.outcome == 'success' || steps.tests.outcome == 'failure'
+        if: always() && (steps.tests.outcome == 'success' || steps.tests.outcome == 'failure')
         run: |
           set +e
           set -o pipefail
