@@ -1,0 +1,166 @@
+# Windows comparison for issue 254. One push/dispatch on ci/windows-test-254
+# runs the fixed gen_llms.py and the pre-fix copy side by side.
+
+name: windows-llms
+
+on:
+  push:
+    branches: [ci/windows-test-254]
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: llms (${{ matrix.variant }})
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [fixed, unfixed]
+    env:
+      PYTHONUTF8: '0'
+      SUI_RELEASE: mainnet-v1.77.2
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Restore unfixed gen_llms.py
+        if: matrix.variant == 'unfixed'
+        run: |
+          set -euo pipefail
+          echo "HEAD=$(git rev-parse HEAD)"
+          echo "origin/main=$(git rev-parse origin/main 2>/dev/null || echo missing)"
+          rev="$(git merge-base HEAD origin/main 2>/dev/null || true)"
+          if [ -z "${rev}" ]; then
+            rev="$(git rev-parse 'fix/llms-cross-platform-254~1' 2>/dev/null || true)"
+          fi
+          if [ -z "${rev}" ]; then
+            git fetch --no-tags https://github.com/interest-protocol/blast-v2-contracts.git main
+            rev=FETCH_HEAD
+          fi
+          echo "Restoring scripts/gen_llms.py from ${rev}"
+          git checkout "${rev}" -- scripts/gen_llms.py
+          git diff --stat
+          echo "scripts/gen_llms.py blob $(git hash-object scripts/gen_llms.py)"
+
+      - name: Print Python version and locale
+        run: |
+          echo "variant=${{ matrix.variant }}"
+          git diff --stat
+          python --version
+          python -c "import locale,sys;print(locale.getpreferredencoding(False), sys.flags.utf8_mode)"
+
+      - name: Install pinned Sui CLI
+        run: |
+          set -euo pipefail
+          asset="sui-${SUI_RELEASE}-windows-x86_64.tgz"
+          names="$(curl -fsSL "https://api.github.com/repos/MystenLabs/sui/releases/tags/${SUI_RELEASE}" \
+            | python -c 'import json,sys; print("\n".join(a["name"] for a in json.load(sys.stdin).get("assets", [])))')"
+          echo "Release assets:"
+          printf '%s\n' "${names}"
+          if ! printf '%s\n' "${names}" | grep -Fxq "${asset}"; then
+            asset="$(printf '%s\n' "${names}" | grep -E 'windows-x86_64\.(tgz|zip)$' | head -n 1 || true)"
+            if [ -z "${asset}" ]; then
+              echo "No windows-x86_64 Sui CLI asset in ${SUI_RELEASE}" >&2
+              exit 1
+            fi
+            echo "Expected asset name missing; using ${asset}"
+          fi
+          curl -fsSL -o sui-cli.archive "https://github.com/MystenLabs/sui/releases/download/${SUI_RELEASE}/${asset}"
+          dest="${RUNNER_TEMP}/sui-cli"
+          mkdir -p "${dest}"
+          case "${asset}" in
+            *.zip) unzip -q sui-cli.archive -d "${dest}" ;;
+            *) tar -tzf sui-cli.archive | head -n 30; tar -xzf sui-cli.archive -C "${dest}" ;;
+          esac
+          sui_exe="$(find "${dest}" -type f -name 'sui.exe' | head -n 1)"
+          if [ -z "${sui_exe}" ]; then
+            echo "sui.exe not found in ${asset}" >&2
+            find "${dest}" -maxdepth 3 -print >&2
+            exit 1
+          fi
+          bindir="$(dirname "${sui_exe}")"
+          if command -v cygpath >/dev/null 2>&1; then
+            win_bindir="$(cygpath -w "${bindir}")"
+          else
+            win_bindir="${bindir}"
+          fi
+          echo "Adding ${win_bindir} to PATH"
+          echo "${win_bindir}" >> "${GITHUB_PATH}"
+          export PATH="${bindir}:${PATH}"
+          sui --version
+
+      - name: Fetch source revisions recorded for current publications
+        run: |
+          python - <<'PYCODE'
+          import json
+          import subprocess
+          import sys
+          import tomllib
+          from pathlib import Path
+          sys.path.insert(0, "scripts")
+          from gen_llms import PACKAGES
+          published = set()
+          for package, _ in PACKAGES:
+              path = Path(package) / "Published.toml"
+              if path.exists():
+                  entry = tomllib.loads(path.read_text()).get("published", {}).get("mainnet")
+                  if entry:
+                      published.add(entry["published-at"])
+          for path in Path("deployments/sui/mainnet").glob("*.json"):
+              text = path.read_text()
+              data = json.loads(text)
+              kind = str(data.get("recordKind", ""))
+              commit = (data.get("repository") or {}).get("commit")
+              if not commit or data.get("status") != "success" or "deployment" not in kind or "rehearsal" in kind:
+                  continue
+              if not any(address in text for address in published):
+                  continue
+              present = subprocess.run(["git", "cat-file", "-e", f"{commit}^{{commit}}"], stderr=subprocess.DEVNULL)
+              if present.returncode:
+                  subprocess.run(["git", "fetch", "--no-tags", "origin", commit], check=True)
+          PYCODE
+
+      - name: Test summary identity handling
+        id: tests
+        run: python scripts/test_gen_llms.py
+
+      - name: Check llms-full.txt and llms/ are current
+        id: check
+        if: steps.tests.outcome == 'success' || steps.tests.outcome == 'failure'
+        run: |
+          set +e
+          set -o pipefail
+          python scripts/gen_llms.py --check 2>&1 | tee gen_llms_check.txt
+          status=${PIPESTATUS[0]}
+          {
+            echo "### gen_llms.py --check (${{ matrix.variant }}) exit ${status}"
+            echo
+            bytes=$(wc -c < gen_llms_check.txt | tr -d '[:space:]')
+            echo '````'
+            if [ "${bytes}" -le 200000 ]; then
+              cat gen_llms_check.txt
+            else
+              echo "Full output is ${bytes} bytes. Artifact gen-llms-check-${{ matrix.variant }} has the complete log."
+              echo
+              echo "--- head ---"
+              head -n 120 gen_llms_check.txt
+              echo
+              echo "--- tail ---"
+              tail -n 80 gen_llms_check.txt
+            fi
+            echo '````'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          exit "${status}"
+
+      - name: Upload gen_llms.py --check output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gen-llms-check-${{ matrix.variant }}
+          path: gen_llms_check.txt
+          if-no-files-found: warn
