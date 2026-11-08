@@ -58,18 +58,24 @@ jobs:
         run: |
           set -euo pipefail
           asset="sui-${SUI_RELEASE}-windows-x86_64.tgz"
-          names="$(curl -fsSL "https://api.github.com/repos/MystenLabs/sui/releases/tags/${SUI_RELEASE}" \
-            | python -c 'import json,sys; print("\n".join(a["name"] for a in json.load(sys.stdin).get("assets", [])))')"
-          echo "Release assets:"
-          printf '%s\n' "${names}"
-          if ! printf '%s\n' "${names}" | grep -Fxq "${asset}"; then
-            asset="$(printf '%s\n' "${names}" | grep -E 'windows-x86_64\.(tgz|zip)$' | head -n 1 || true)"
-            if [ -z "${asset}" ]; then
-              echo "No windows-x86_64 Sui CLI asset in ${SUI_RELEASE}" >&2
-              exit 1
+          body="$(mktemp)"
+          if curl -fsSL -o "${body}" "https://api.github.com/repos/MystenLabs/sui/releases/tags/${SUI_RELEASE}"; then
+            asset_names="$(python -c 'import json,sys; print("\n".join(a["name"] for a in json.load(sys.stdin).get("assets", [])))' < "${body}")"
+            echo "Release assets:"
+            printf '%s\n' "${asset_names}"
+            if ! printf '%s\n' "${asset_names}" | grep -Fxq "${asset}"; then
+              alt="$(printf '%s\n' "${asset_names}" | grep -E 'windows-x86_64\.(tgz|zip)$' | head -n 1 || true)"
+              if [ -z "${alt}" ]; then
+                echo "No windows-x86_64 Sui CLI asset in ${SUI_RELEASE}" >&2
+                exit 1
+              fi
+              echo "Expected asset name missing; using ${alt}"
+              asset="${alt}"
             fi
-            echo "Expected asset name missing; using ${asset}"
+          else
+            echo "Release API request failed; downloading the verified asset ${asset}"
           fi
+          rm -f "${body}"
           curl -fsSL -o sui-cli.archive "https://github.com/MystenLabs/sui/releases/download/${SUI_RELEASE}/${asset}"
           # Git Bash tar cannot open a Windows-style RUNNER_TEMP path.
           dest="$(cygpath -u "${RUNNER_TEMP}")/sui-cli"
