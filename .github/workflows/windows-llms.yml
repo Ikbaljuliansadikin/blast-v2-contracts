@@ -71,7 +71,8 @@ jobs:
             echo "Expected asset name missing; using ${asset}"
           fi
           curl -fsSL -o sui-cli.archive "https://github.com/MystenLabs/sui/releases/download/${SUI_RELEASE}/${asset}"
-          dest="${RUNNER_TEMP}/sui-cli"
+          # Git Bash tar cannot open a Windows-style RUNNER_TEMP path.
+          dest="$(cygpath -u "${RUNNER_TEMP}")/sui-cli"
           mkdir -p "${dest}"
           case "${asset}" in
             *.zip) unzip -q sui-cli.archive -d "${dest}" ;;
@@ -90,7 +91,7 @@ jobs:
             win_bindir="${bindir}"
           fi
           echo "Adding ${win_bindir} to PATH"
-          echo "${win_bindir}" >> "${GITHUB_PATH}"
+          echo "${win_bindir}" >> "$(cygpath -u "${GITHUB_PATH}")"
           export PATH="${bindir}:${PATH}"
           sui --version
 
