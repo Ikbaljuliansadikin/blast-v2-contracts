@@ -483,7 +483,8 @@ def matches_publication(path: str, commit: str) -> bool | None:
     # Resolve local edges relative to each checkout's layout before comparing them.
     def normalize_manifest(text: str, directory: str, relocated: bool) -> str:
         def local_path(match: re.Match) -> str:
-            target = (ROOT / directory / match[2]).resolve().relative_to(ROOT).as_posix()
+            root = ROOT.resolve()
+            target = (root / directory / match[2]).resolve().relative_to(root).as_posix()
             if relocated and target.startswith("sui/"):
                 target = legacy_package_path(target)
             return f'{match[1]}"{target}"'
